@@ -51,7 +51,7 @@ CACHE_TIME_FILE = "/tmp/clarity_collective_dashboard_cache_time.txt"
 # Track API errors for dashboard display
 _api_errors = []
 
-BUILD_TIMEOUT = int(os.environ.get("BUILD_TIMEOUT", "900"))  # 15 min default, overridable via env var
+BUILD_TIMEOUT = int(os.environ.get("BUILD_TIMEOUT", "120"))  # 2 min default (reduced from 15 min)
 _build_lock = threading.Lock()  # Prevent multiple simultaneous builds
 
 def _save_cache_to_disk(html):
@@ -100,13 +100,13 @@ def _build_cache_background():
         import traceback
         print(f"[CACHE] Background build failed after {time.time()-start:.1f}s: {e}", flush=True)
         traceback.print_exc()
-        # Try loading disk cache as fallback
+        # Try loading disk cache as fallback — never replace good HTML with error HTML
         disk_html, disk_time = _load_cache_from_disk()
-        if disk_html:
+        if disk_html and (not _cache["html"] or len(_cache["html"]) < 5000):
             _cache["html"] = disk_html
             _cache["time"] = disk_time
             print(f"[CACHE] Loaded disk cache as fallback ({len(disk_html)} bytes)", flush=True)
-        elif not _cache["html"]:
+        elif not _cache["html"] or len(_cache["html"]) < 5000:
             _cache["html"] = _build_error_html(str(e))
             _cache["time"] = time.time()
     finally:
@@ -138,17 +138,17 @@ def _ensure_cache():
                 _build_lock.release()
             except RuntimeError:
                 pass  # Lock wasn't held
-            # Try disk cache as fallback
-            if not _cache["html"]:
-                disk_html, disk_time = _load_cache_from_disk()
-                if disk_html:
-                    _cache["html"] = disk_html
-                    _cache["time"] = disk_time
-                    print(f"[CACHE] Loaded disk cache as fallback ({len(disk_html)} bytes)", flush=True)
-                else:
-                    _cache["html"] = _build_error_html(
-                        f"Dashboard build {reason}. The APIs may be slow. Try /refresh in a minute.")
-                    _cache["time"] = time.time()
+            # Try disk cache as fallback — always prefer real data over error HTML
+            disk_html, disk_time = _load_cache_from_disk()
+            if disk_html and (not _cache["html"] or len(_cache["html"]) < 5000):
+                # Load disk cache if we have no HTML, or if current HTML is just an error page (<5KB)
+                _cache["html"] = disk_html
+                _cache["time"] = disk_time
+                print(f"[CACHE] Loaded disk cache as fallback ({len(disk_html)} bytes)", flush=True)
+            elif not _cache["html"]:
+                _cache["html"] = _build_error_html(
+                    f"Dashboard build {reason}. The APIs may be slow. Try /refresh in a minute.")
+                _cache["time"] = time.time()
             # Don't return — fall through to start a new build
         else:
             return  # Still building, wait
@@ -316,7 +316,7 @@ def fetch_fb_insights(since_date, until_date):
         "limit": 200,
         "access_token": FB_TOKEN
     }
-    res = requests.get(url, params=params, timeout=(10, 30))
+    res = requests.get(url, params=params, timeout=(5, 15))
     if res.status_code != 200:
         try:
             err_data = res.json()
@@ -445,7 +445,7 @@ def fetch_fb_event_meta():
     page_count = 0
     print(f"[FB META] Fetching campaign metadata...", flush=True)
     while True:
-        res = requests.get(url, params=params, timeout=(10, 30))
+        res = requests.get(url, params=params, timeout=(5, 15))
         if res.status_code != 200:
             try:
                 err_data = res.json()
@@ -579,15 +579,16 @@ def build_dashboard_html():
         _p1_futures = [_p1_pool.submit(_fetch_meta)]
         for pname, (since, until) in fb_date_ranges.items():
             _p1_futures.append(_p1_pool.submit(_fetch_fb_period, pname, since, until))
-        # Wait up to 60s for all FB calls — if any hang, move on without them
-        done, not_done = wait(_p1_futures, timeout=60)
+        # Wait up to 20s for all FB calls — if any hang, move on without them
+        # (Reduced from 60s to avoid blocking the build when FB API is slow/down)
+        done, not_done = wait(_p1_futures, timeout=20)
         for f in done:
             try:
                 f.result()
             except Exception as e:
                 print(f"[BUILD] FB task failed: {e}", flush=True)
         if not_done:
-            print(f"[BUILD] WARNING: {len(not_done)} FB tasks timed out after 60s, skipping", flush=True)
+            print(f"[BUILD] WARNING: {len(not_done)} FB tasks timed out after 20s, skipping", flush=True)
             for f in not_done:
                 f.cancel()
     finally:
