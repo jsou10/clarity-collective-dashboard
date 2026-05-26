@@ -602,7 +602,7 @@ def build_dashboard_html():
     meta_by_num = meta_result[0] if meta_result[0] is not None else {}
     meta_by_city = meta_result[1] if meta_result[1] is not None else {}
     events = eb_events_result[0] if eb_events_result[0] else []
-    print(f"[BUILD] Phase 1 (parallel) done in {time.time()-t0:.1f}s — {len(events)} EB events, {len(fb_period_results)} FB periods", flush=True)
+    print(f"[BUILD] Phase 1 (parallel) done in {time.time()-t0:.1f}s — {len(events)} EB events, {len(fb_period_results)} FB periods, {len(meta_by_num)} meta_by_num, {len(meta_by_city)} meta_by_city", flush=True)
 
     # Fallback mapping if FB meta API fails to return data
     known_events = {
@@ -617,10 +617,12 @@ def build_dashboard_html():
     all_event_data = []
     all_tickets_flat = []
 
-    for event in events:
+    print(f"[BUILD] Starting event classification loop for {len(events)} events...", flush=True)
+    for ev_i, event in enumerate(events):
         eid = event["id"]
         name = event["name"]["text"]
         city = extract_city(event)
+        print(f"[BUILD] Classifying event {ev_i+1}/{len(events)}: {name[:60]} (city={city}, id={eid})", flush=True)
         capacity = event.get("capacity", 0)
         start_date = event["start"]["local"]
         end_date = event["end"]["local"]
@@ -704,24 +706,34 @@ def build_dashboard_html():
         })
         if not is_past:
             active_event_ids.append((idx, eid, city))
+        print(f"[BUILD]   -> classified: is_past={is_past}, fb_status={fb_status}, total_sold={total_sold}", flush=True)
+
+    print(f"[BUILD] Classification done in {time.time()-t0:.1f}s — {len(all_event_data)} total, {len(active_event_ids)} active", flush=True)
 
     # ===== PHASE 2: Fetch attendees/orders for active events in parallel =====
     def _fetch_event_detail(idx, eid, city, since_30):
+        print(f"[BUILD]   Fetching attendees for {city} (eid={eid})...", flush=True)
+        t_att = time.time()
         try:
             attendees = fetch_eb_attendees(eid)
         except Exception as e:
             print(f"[BUILD] EB attendees failed for {city}: {e}", flush=True)
             attendees = []
+        print(f"[BUILD]   Got {len(attendees)} attendees for {city} in {time.time()-t_att:.1f}s", flush=True)
+        print(f"[BUILD]   Fetching orders for {city}...", flush=True)
+        t_ord = time.time()
         try:
             orders = fetch_eb_orders(eid, since=since_30)
         except Exception as e:
             print(f"[BUILD] EB orders failed for {city}: {e}", flush=True)
             orders = []
+        print(f"[BUILD]   Got {len(orders)} orders for {city} in {time.time()-t_ord:.1f}s", flush=True)
         return (idx, city, attendees, orders)
 
     if active_event_ids:
         print(f"[BUILD] Phase 2: fetching attendees/orders for {len(active_event_ids)} active events (sequential, EB rate limit)...", flush=True)
-        for evt_idx, eid, city in active_event_ids:
+        for p2_i, (evt_idx, eid, city) in enumerate(active_event_ids):
+            print(f"[BUILD] Phase 2 event {p2_i+1}/{len(active_event_ids)}: {city} (eid={eid})", flush=True)
             try:
                 evt_idx, city, attendees, orders = _fetch_event_detail(evt_idx, eid, city, periods["last30"])
             except Exception as e:
@@ -747,9 +759,10 @@ def build_dashboard_html():
             time.sleep(0.15)  # Brief pace between events
 
     all_tickets_flat.sort(key=lambda x: x["created"], reverse=True)
-    print(f"[BUILD] Phase 2 done in {time.time()-t0:.1f}s ({len(active_event_ids)} active, {len(all_event_data)-len(active_event_ids)} past)", flush=True)
+    print(f"[BUILD] Phase 2 done in {time.time()-t0:.1f}s ({len(active_event_ids)} active, {len(all_event_data)-len(active_event_ids)} past, {len(all_tickets_flat)} total tickets)", flush=True)
 
     # ===== Process FB period results =====
+    print(f"[BUILD] Processing FB period results ({len(fb_period_results)} periods)...", flush=True)
     def _aggregate_fb(campaigns):
         fb_by_event = {}
         for c in campaigns:
