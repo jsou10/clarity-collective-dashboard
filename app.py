@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify, request
 
 ET = ZoneInfo("America/New_York")
+APP_VERSION = "v2.1-fix-event-match"
 
 app = Flask(__name__)
 
@@ -538,11 +539,13 @@ def fetch_fb_event_meta():
                     city = city_aliases.get(ct, ct)
                     break
 
-            if ev_num and city:
+            if ev_num:
                 # Store by event number — ACTIVE takes priority for same event_num
+                # City may be None if not in campaign name (known_events fills it in later)
                 entry = {"city": city, "type": typ_clean, "fb_status": status, "year_month": year_month}
                 if ev_num not in meta_by_num or status == "ACTIVE" or meta_by_num[ev_num].get("fb_status") != "ACTIVE":
                     meta_by_num[ev_num] = entry
+                    print(f"[FB META] Stored event {ev_num}: city={city}, status={status}, ym={year_month}", flush=True)
             elif city:
                 # No event number — store by city+year_month as fallback
                 # Include year_month so we can match to the correct event
@@ -699,6 +702,7 @@ def build_dashboard_html():
     all_event_data = []
     all_tickets_flat = []
 
+    print(f"[BUILD] meta_by_num before classification: {json.dumps({str(k): v for k, v in meta_by_num.items()})}", flush=True)
     print(f"[BUILD] Starting event classification loop for {len(events)} events...", flush=True)
     for ev_i, event in enumerate(events):
         eid = event["id"]
@@ -751,6 +755,7 @@ def build_dashboard_html():
                 best_type = info.get("type", "")
                 best_fb_status = info.get("fb_status", "UNKNOWN")
 
+        print(f"[BUILD]   Classification result for {city}: best_num={best_num}, best_score={best_score}, best_fb_status={best_fb_status}", flush=True)
         if best_num == 0:
             # Try date-specific city key first, then adjacent months
             city_key_exact = f"{city}:{eb_year}-{eb_month:02d}"
@@ -1741,6 +1746,7 @@ def cache_state():
     disk_size = os.path.getsize(CACHE_FILE) if disk_exists else 0
     build_thread = _cache.get("build_thread")
     return jsonify({
+        "version": APP_VERSION,
         "building": _cache["building"],
         "html_exists": _cache["html"] is not None,
         "html_len": len(_cache["html"]) if _cache["html"] else 0,
