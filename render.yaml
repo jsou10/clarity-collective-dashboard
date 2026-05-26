@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: clarity-collective-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 180
+    envVars:
+      - key: EB_TOKEN
+        sync: false
+      - key: EB_ORG_ID
+        sync: false
+      - key: FB_TOKEN
+        sync: false
+      - key: FB_AD_ACCOUNT
+        sync: false
