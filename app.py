@@ -51,6 +51,41 @@ CACHE_TIME_FILE = "/tmp/clarity_collective_dashboard_cache_time.txt"
 # Track API errors for dashboard display
 _api_errors = []
 
+# Persistent FB data cache — survives FB API timeouts
+FB_DATA_CACHE_FILE = "/tmp/clarity_collective_fb_cache.json"
+_fb_data_cache = {"period_results": {}, "meta_by_num": {}, "meta_by_city": {}, "time": 0}
+
+def _save_fb_cache(period_results, meta_by_num, meta_by_city):
+    """Save FB data to disk so it survives API timeouts and restarts."""
+    global _fb_data_cache
+    _fb_data_cache = {
+        "period_results": period_results,
+        "meta_by_num": meta_by_num,
+        "meta_by_city": meta_by_city,
+        "time": time.time()
+    }
+    try:
+        with open(FB_DATA_CACHE_FILE, "w") as f:
+            json.dump(_fb_data_cache, f)
+        print(f"[FB_CACHE] Saved FB data cache ({len(period_results)} periods)", flush=True)
+    except Exception as e:
+        print(f"[FB_CACHE] Failed to save: {e}", flush=True)
+
+def _load_fb_cache():
+    """Load cached FB data from disk."""
+    global _fb_data_cache
+    try:
+        with open(FB_DATA_CACHE_FILE, "r") as f:
+            data = json.load(f)
+        if data and data.get("period_results"):
+            _fb_data_cache = data
+            age = time.time() - data.get("time", 0)
+            print(f"[FB_CACHE] Loaded FB data cache ({len(data['period_results'])} periods, {age:.0f}s old)", flush=True)
+            return data
+    except Exception:
+        pass
+    return None
+
 BUILD_TIMEOUT = int(os.environ.get("BUILD_TIMEOUT", "120"))  # 2 min default (reduced from 15 min)
 _build_lock = threading.Lock()  # Prevent multiple simultaneous builds
 
@@ -579,21 +614,44 @@ def build_dashboard_html():
         _p1_futures = [_p1_pool.submit(_fetch_meta)]
         for pname, (since, until) in fb_date_ranges.items():
             _p1_futures.append(_p1_pool.submit(_fetch_fb_period, pname, since, until))
-        # Wait up to 20s for all FB calls — if any hang, move on without them
-        # (Reduced from 60s to avoid blocking the build when FB API is slow/down)
-        done, not_done = wait(_p1_futures, timeout=20)
+        # Wait up to 10s for all FB calls — FB either responds in <2s or not at all
+        # If it times out, we use cached FB data from the last successful call
+        done, not_done = wait(_p1_futures, timeout=10)
         for f in done:
             try:
                 f.result()
             except Exception as e:
                 print(f"[BUILD] FB task failed: {e}", flush=True)
         if not_done:
-            print(f"[BUILD] WARNING: {len(not_done)} FB tasks timed out after 20s, skipping", flush=True)
+            print(f"[BUILD] WARNING: {len(not_done)} FB tasks timed out after 10s, will use cached data", flush=True)
             for f in not_done:
                 f.cancel()
     finally:
         _p1_pool.shutdown(wait=False)
-    print(f"[BUILD] Phase 1A done in {time.time()-t0:.1f}s — {len(fb_period_results)} FB periods", flush=True)
+
+    # If FB API returned data, cache it. If it timed out, use cached data.
+    fb_api_worked = len(fb_period_results) > 0 and any(len(v) > 0 for v in fb_period_results.values())
+    fb_meta_worked = meta_result[0] is not None and len(meta_result[0]) > 0
+
+    if fb_api_worked or fb_meta_worked:
+        # FB API returned fresh data — save it to persistent cache
+        _save_fb_cache(
+            fb_period_results if fb_api_worked else _fb_data_cache.get("period_results", {}),
+            meta_result[0] if fb_meta_worked else _fb_data_cache.get("meta_by_num", {}),
+            meta_result[1] if fb_meta_worked else _fb_data_cache.get("meta_by_city", {})
+        )
+        print(f"[BUILD] Phase 1A done in {time.time()-t0:.1f}s — {len(fb_period_results)} FB periods (fresh)", flush=True)
+    else:
+        # FB API timed out — try to use cached FB data
+        cached = _fb_data_cache if _fb_data_cache.get("period_results") else _load_fb_cache()
+        if cached and cached.get("period_results"):
+            fb_period_results = cached["period_results"]
+            meta_result[0] = cached.get("meta_by_num", {})
+            meta_result[1] = cached.get("meta_by_city", {})
+            age = time.time() - cached.get("time", 0)
+            print(f"[BUILD] Phase 1A done in {time.time()-t0:.1f}s — FB API timed out, using cached data ({len(fb_period_results)} periods, {age:.0f}s old)", flush=True)
+        else:
+            print(f"[BUILD] Phase 1A done in {time.time()-t0:.1f}s — FB API timed out, no cached data available", flush=True)
 
     # --- Phase 1B: EB events sequential (EB has strict rate limits) ---
     print(f"[BUILD] Phase 1B: EB events (sequential)...", flush=True)
@@ -1745,6 +1803,9 @@ if _disk_html:
     print(f"[STARTUP] Loaded cache from disk ({len(_disk_html)} bytes, {time.time()-_disk_time:.0f}s old)", flush=True)
 else:
     print(f"[STARTUP] No valid disk cache found — first request will see loading page until build completes", flush=True)
+
+# Load FB data cache on startup
+_load_fb_cache()
 
 # Start background data build on import (covers both gunicorn and direct run)
 _ensure_cache()
