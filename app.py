@@ -127,23 +127,35 @@ def _build_cache_background():
     start = time.time()
     try:
         html = build_dashboard_html()
-        _cache["html"] = html
-        _cache["time"] = time.time()
-        _save_cache_to_disk(html)
-        print(f"[CACHE] Build succeeded in {time.time()-start:.1f}s", flush=True)
+        # SAFETY: Only replace cache if new HTML is valid (>5KB = real dashboard)
+        if html and len(html) > 5000:
+            _cache["html"] = html
+            _cache["time"] = time.time()
+            _save_cache_to_disk(html)
+            print(f"[CACHE] Build succeeded in {time.time()-start:.1f}s ({len(html)} bytes)", flush=True)
+        else:
+            # Build returned short/empty HTML — keep existing cache
+            print(f"[CACHE] Build returned short HTML ({len(html) if html else 0} bytes) in {time.time()-start:.1f}s — keeping existing cache", flush=True)
+            # Still mark cache as recently checked to avoid immediate retry
+            if _cache["html"] and len(_cache["html"]) > 5000:
+                _cache["time"] = time.time()
     except Exception as e:
         import traceback
         print(f"[CACHE] Background build failed after {time.time()-start:.1f}s: {e}", flush=True)
         traceback.print_exc()
         # Try loading disk cache as fallback — never replace good HTML with error HTML
         disk_html, disk_time = _load_cache_from_disk()
-        if disk_html and (not _cache["html"] or len(_cache["html"]) < 5000):
+        if disk_html and len(disk_html) > 5000 and (not _cache["html"] or len(_cache["html"]) < 5000):
             _cache["html"] = disk_html
             _cache["time"] = disk_time
             print(f"[CACHE] Loaded disk cache as fallback ({len(disk_html)} bytes)", flush=True)
         elif not _cache["html"] or len(_cache["html"]) < 5000:
             _cache["html"] = _build_error_html(str(e))
             _cache["time"] = time.time()
+        else:
+            # We have good HTML, just mark it as recently checked
+            _cache["time"] = time.time()
+            print(f"[CACHE] Build failed but keeping existing good cache ({len(_cache['html'])} bytes)", flush=True)
     finally:
         _cache["building"] = False
         _cache["build_thread"] = None
@@ -173,17 +185,21 @@ def _ensure_cache():
                 _build_lock.release()
             except RuntimeError:
                 pass  # Lock wasn't held
-            # Try disk cache as fallback — always prefer real data over error HTML
-            disk_html, disk_time = _load_cache_from_disk()
-            if disk_html and (not _cache["html"] or len(_cache["html"]) < 5000):
-                # Load disk cache if we have no HTML, or if current HTML is just an error page (<5KB)
-                _cache["html"] = disk_html
-                _cache["time"] = disk_time
-                print(f"[CACHE] Loaded disk cache as fallback ({len(disk_html)} bytes)", flush=True)
-            elif not _cache["html"]:
-                _cache["html"] = _build_error_html(
-                    f"Dashboard build {reason}. The APIs may be slow. Try /refresh in a minute.")
-                _cache["time"] = time.time()
+            # SAFETY: If we already have good HTML (>5KB), keep it and just mark as fresh
+            if _cache["html"] and len(_cache["html"]) > 5000:
+                _cache["time"] = time.time()  # Prevent immediate retry
+                print(f"[CACHE] Build timed out but keeping existing good cache ({len(_cache['html'])} bytes)", flush=True)
+            else:
+                # No good HTML — try disk cache as fallback
+                disk_html, disk_time = _load_cache_from_disk()
+                if disk_html and len(disk_html) > 5000:
+                    _cache["html"] = disk_html
+                    _cache["time"] = time.time()
+                    print(f"[CACHE] Loaded disk cache as fallback ({len(disk_html)} bytes)", flush=True)
+                elif not _cache["html"]:
+                    _cache["html"] = _build_error_html(
+                        f"Dashboard build {reason}. The APIs may be slow. Try /refresh in a minute.")
+                    _cache["time"] = time.time()
             # Don't return — fall through to start a new build
         else:
             return  # Still building, wait
