@@ -686,6 +686,13 @@ def build_dashboard_html():
     for num, info in known_events.items():
         if num not in meta_by_num:
             meta_by_num[num] = info
+        else:
+            # Merge missing fields from known_events into API-sourced data
+            # (e.g., city often missing from campaign names)
+            for field in ("city", "type", "year_month"):
+                if not meta_by_num[num].get(field) and info.get(field):
+                    meta_by_num[num][field] = info[field]
+                    print(f"[BUILD] Merged known_events[{num}].{field}={info[field]} into meta_by_num", flush=True)
 
     # ===== Classify events into active vs past =====
     active_event_ids = []  # (index, eid, city) for events needing attendee/order data
@@ -716,7 +723,9 @@ def build_dashboard_html():
         best_score = 999
 
         for num, info in meta_by_num.items():
-            if info.get("city", "").lower() != city.lower():
+            # City match: required if both have city info, skip if either is missing
+            info_city = info.get("city", "")
+            if info_city and city and info_city.lower() != city.lower():
                 continue
             ym = info.get("year_month")
             if ym:
