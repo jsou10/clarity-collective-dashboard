@@ -374,7 +374,7 @@ def fetch_fb_insights(since_date, until_date):
         "limit": 200,
         "access_token": FB_TOKEN
     }
-    res = requests.get(url, params=params, timeout=(5, 15))
+    res = requests.get(url, params=params, timeout=(10, 30))
     if res.status_code != 200:
         try:
             err_data = res.json()
@@ -635,40 +635,51 @@ def build_dashboard_html():
 
     # --- Phase 1A: All FB calls in parallel (FB API is fast, high rate limits) ---
     print(f"[BUILD] Phase 1A: FB calls in parallel...", flush=True)
-    _p1_pool = ThreadPoolExecutor(max_workers=4)
+    _p1_pool = ThreadPoolExecutor(max_workers=8)
     try:
         _p1_futures = [_p1_pool.submit(_fetch_meta)]
         for pname, (since, until) in fb_date_ranges.items():
             _p1_futures.append(_p1_pool.submit(_fetch_fb_period, pname, since, until))
-        # Wait up to 10s for all FB calls — FB either responds in <2s or not at all
-        # If it times out, we use cached FB data from the last successful call
-        done, not_done = wait(_p1_futures, timeout=10)
+        # Wait up to 45s for all FB calls — 7 parallel tasks need sufficient time
+        done, not_done = wait(_p1_futures, timeout=45)
         for f in done:
             try:
                 f.result()
             except Exception as e:
                 print(f"[BUILD] FB task failed: {e}", flush=True)
         if not_done:
-            print(f"[BUILD] WARNING: {len(not_done)} FB tasks timed out after 10s, will use cached data", flush=True)
+            print(f"[BUILD] WARNING: {len(not_done)} FB tasks timed out after 45s, will use cached data for missing periods", flush=True)
             for f in not_done:
                 f.cancel()
     finally:
         _p1_pool.shutdown(wait=False)
 
-    # If FB API returned data, cache it. If it timed out, use cached data.
+    # Merge fresh FB data with cached data — per-period, not all-or-nothing
+    cached = _fb_data_cache if _fb_data_cache.get("period_results") else _load_fb_cache()
+    cached_periods = cached.get("period_results", {}) if cached else {}
     fb_api_worked = len(fb_period_results) > 0 and any(len(v) > 0 for v in fb_period_results.values())
     fb_meta_worked = meta_result[0] is not None and len(meta_result[0]) > 0
 
+    # Fill in any missing periods from cache
+    if cached_periods:
+        for pname in fb_date_ranges:
+            if pname not in fb_period_results or len(fb_period_results.get(pname, [])) == 0:
+                if pname in cached_periods and len(cached_periods[pname]) > 0:
+                    fb_period_results[pname] = cached_periods[pname]
+                    print(f"[BUILD] Using cached FB data for period '{pname}'", flush=True)
+
+    fresh_count = sum(1 for p in fb_period_results.values() if len(p) > 0)
+    print(f"[BUILD] Phase 1A done in {time.time()-t0:.1f}s — {len(fb_period_results)} periods ({fresh_count} with data)", flush=True)
+
     if fb_api_worked or fb_meta_worked:
-        # FB API returned fresh data — save it to persistent cache
+        # Save merged data to persistent cache
         _save_fb_cache(
-            fb_period_results if fb_api_worked else _fb_data_cache.get("period_results", {}),
+            fb_period_results,
             meta_result[0] if fb_meta_worked else _fb_data_cache.get("meta_by_num", {}),
             meta_result[1] if fb_meta_worked else _fb_data_cache.get("meta_by_city", {})
         )
-        print(f"[BUILD] Phase 1A done in {time.time()-t0:.1f}s — {len(fb_period_results)} FB periods (fresh)", flush=True)
     else:
-        # FB API timed out — try to use cached FB data
+        # FB API completely failed — try to use cached FB data
         cached = _fb_data_cache if _fb_data_cache.get("period_results") else _load_fb_cache()
         if cached and cached.get("period_results"):
             fb_period_results = cached["period_results"]
