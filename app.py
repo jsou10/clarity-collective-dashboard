@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify, request
 
 ET = ZoneInfo("America/New_York")
-APP_VERSION = "v2.1-fix-event-match"
+APP_VERSION = "v2.2-fix-date-ranges"
 
 app = Flask(__name__)
 
@@ -213,13 +213,19 @@ def _proactive_refresh_loop():
     refresh_interval = CACHE_TTL - 300  # Rebuild 5 min before TTL expires
     if refresh_interval < 300:
         refresh_interval = 300  # Minimum 5 min between rebuilds
+    print(f"[PROACTIVE] Refresh loop started (interval={refresh_interval}s)", flush=True)
     while True:
         time.sleep(refresh_interval)
         try:
-            if not _cache["building"]:
+            age = time.time() - _cache.get("time", 0)
+            if not _cache["building"] and age > (CACHE_TTL * 0.5):
+                print(f"[PROACTIVE] Cache is {age:.0f}s old, triggering rebuild...", flush=True)
                 _build_cache_background()
-        except Exception:
-            pass  # Best effort
+            else:
+                print(f"[PROACTIVE] Skip: building={_cache['building']}, age={age:.0f}s", flush=True)
+        except Exception as e:
+            print(f"[PROACTIVE] Error in refresh loop (continuing): {e}", flush=True)
+            time.sleep(60)  # Wait a bit after errors
 
 def _build_error_html(error_msg):
     """Return a simple error page that auto-retries."""
@@ -590,13 +596,14 @@ def build_dashboard_html():
         "all": "2020-01-01T00:00:00Z"
     }
 
+    today_str = today_start.strftime("%Y-%m-%d")
     fb_date_ranges = {
-        "today": (today_start.strftime("%Y-%m-%d"), today_start.strftime("%Y-%m-%d")),
+        "today": (today_str, today_str),
         "yesterday": ((today_start - timedelta(days=1)).strftime("%Y-%m-%d"), (today_start - timedelta(days=1)).strftime("%Y-%m-%d")),
-        "last2": ((today_start - timedelta(days=2)).strftime("%Y-%m-%d"), (today_start - timedelta(days=1)).strftime("%Y-%m-%d")),
-        "last7": ((today_start - timedelta(days=7)).strftime("%Y-%m-%d"), (today_start - timedelta(days=1)).strftime("%Y-%m-%d")),
-        "last30": ((today_start - timedelta(days=30)).strftime("%Y-%m-%d"), (today_start - timedelta(days=1)).strftime("%Y-%m-%d")),
-        "all": ("2025-05-01", today_start.strftime("%Y-%m-%d"))
+        "last2": ((today_start - timedelta(days=1)).strftime("%Y-%m-%d"), today_str),
+        "last7": ((today_start - timedelta(days=6)).strftime("%Y-%m-%d"), today_str),
+        "last30": ((today_start - timedelta(days=29)).strftime("%Y-%m-%d"), today_str),
+        "all": ("2025-05-01", today_str)
     }
 
     # ===== PHASE 1: Fire ALL independent API calls in parallel =====
