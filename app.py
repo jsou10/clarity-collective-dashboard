@@ -608,12 +608,13 @@ def build_dashboard_html():
     }
 
     today_str = today_start.strftime("%Y-%m-%d")
+    yesterday_str = (today_start - timedelta(days=1)).strftime("%Y-%m-%d")
     fb_date_ranges = {
         "today": (today_str, today_str),
-        "yesterday": ((today_start - timedelta(days=1)).strftime("%Y-%m-%d"), (today_start - timedelta(days=1)).strftime("%Y-%m-%d")),
-        "last2": ((today_start - timedelta(days=1)).strftime("%Y-%m-%d"), today_str),
-        "last7": ((today_start - timedelta(days=6)).strftime("%Y-%m-%d"), today_str),
-        "last30": ((today_start - timedelta(days=29)).strftime("%Y-%m-%d"), today_str),
+        "yesterday": (yesterday_str, yesterday_str),
+        "last2": ((today_start - timedelta(days=2)).strftime("%Y-%m-%d"), yesterday_str),
+        "last7": ((today_start - timedelta(days=7)).strftime("%Y-%m-%d"), yesterday_str),
+        "last30": ((today_start - timedelta(days=30)).strftime("%Y-%m-%d"), yesterday_str),
         "all": ("2025-05-01", today_str)
     }
 
