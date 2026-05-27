@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify, request
 
 ET = ZoneInfo("America/New_York")
-APP_VERSION = "v2.2-fix-date-ranges"
+APP_VERSION = "v2.3-fix-city-match"
 
 app = Flask(__name__)
 
@@ -460,10 +460,14 @@ def extract_city_from_fb(campaign_name):
     city_aliases = {"Salt Lake": "Salt Lake City", "OKC": "Oklahoma City",
                     "D.C": "DC", "LA": "Los Angeles", "ATL": "Atlanta"}
 
-    # Search longest names first to avoid substring matches (e.g. "Austin" in "San Antonio")
+    # Use word boundary for short names (<=3 chars) to avoid false positives (e.g. "LA" in "cLArity")
     for city in cities:
-        if city.lower() in campaign_name.lower():
-            return city_aliases.get(city, city)
+        if len(city) <= 3:
+            if re.search(r'\b' + re.escape(city) + r'\b', campaign_name, re.I):
+                return city_aliases.get(city, city)
+        else:
+            if city.lower() in campaign_name.lower():
+                return city_aliases.get(city, city)
     return None
 
 def extract_year_month_from_fb(campaign_name):
@@ -538,12 +542,19 @@ def fetch_fb_event_meta():
             else:
                 typ_clean = "2-Day" if "2-day" in name.lower() or "2 day" in name.lower() else "1-Day"
 
-            # Extract city
+            # Extract city — use word boundary matching to avoid false positives
+            # (e.g., "LA" matching inside "cLArity")
             city = None
             for ct in cities:
-                if ct.lower() in name.lower():
-                    city = city_aliases.get(ct, ct)
-                    break
+                # Use regex word boundary for short names (<=3 chars) to avoid substring false matches
+                if len(ct) <= 3:
+                    if re.search(r'\b' + re.escape(ct) + r'\b', name, re.I):
+                        city = city_aliases.get(ct, ct)
+                        break
+                else:
+                    if ct.lower() in name.lower():
+                        city = city_aliases.get(ct, ct)
+                        break
 
             if ev_num:
                 # Store by event number — ACTIVE takes priority for same event_num
