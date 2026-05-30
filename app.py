@@ -437,7 +437,11 @@ def compute_dashboard_data():
         fb_status = best_fb_status
         duration_label = f"{duration_days}-Day"
         display_city = f"{event_num} {city} ({duration_label})" if event_num else city
-        is_future = start_dt.tzinfo and start_dt > datetime.now(start_dt.tzinfo) or False
+        # EB's start.local is a NAIVE ISO timestamp (no tz info). Compare against
+        # a now() in the same naivety. Don't & with start_dt.tzinfo — that short-
+        # circuits to False for every naive datetime and flips every event to past.
+        now = datetime.now(start_dt.tzinfo) if start_dt.tzinfo else datetime.now()
+        is_future = start_dt > now
         has_activity = total_sold > 0 or fb_status == "ACTIVE"
         is_past = not is_future or (is_future and not has_activity)
 
