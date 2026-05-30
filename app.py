@@ -637,8 +637,14 @@ import threading
 threading.Thread(target=validate_on_startup, daemon=True).start()
 
 # ─── Never-crash handlers ────────────────────────────────────────────────────
+# Only catch *unexpected* exceptions — let Flask's HTTPException subclasses
+# (NotFound, MethodNotAllowed, etc.) propagate so 404s stay 404s.
+from werkzeug.exceptions import HTTPException
+
 @app.errorhandler(Exception)
 def handle_unexpected(e):
+    if isinstance(e, HTTPException):
+        return e
     log("error", "unhandled_exception", error=str(e), trace=traceback.format_exc()[-500:])
     return jsonify({"error": "internal error", "detail": str(e)[:200]}), 500
 
