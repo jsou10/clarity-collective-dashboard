@@ -86,14 +86,16 @@ def is_stale(ts: float) -> bool:
     return bool(ts) and (time.time() - ts) > STALE_THRESHOLD
 
 # ─── Upstream HTTP helpers ───────────────────────────────────────────────────
-def _eb_request(url, params, timeout=(10, 30), max_retries=5):
-    """Eventbrite request with retry on 429 (their rate limits are strict)."""
+def _eb_request(url, params, timeout=(10, 30), max_retries=3):
+    """Eventbrite request with bounded retry on 429. Total worst-case time
+    is ~45s (3 attempts × 30s read-timeout + small backoff). Bounded so a
+    stuck EB endpoint can't make our compute run for hours."""
     last_err = None
     for attempt in range(max_retries):
         try:
             res = requests.get(url, params=params, timeout=timeout)
             if res.status_code == 429:
-                wait = min(2 ** attempt * 2, 30)
+                wait = min(2 ** attempt + 1, 8)  # 2s, 3s, 5s — bounded
                 log("warn", "eb_429", attempt=attempt + 1, wait_s=wait)
                 time.sleep(wait)
                 continue
@@ -102,7 +104,7 @@ def _eb_request(url, params, timeout=(10, 30), max_retries=5):
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
-                time.sleep(min(2 ** attempt, 10))
+                time.sleep(min(2 ** attempt, 4))
                 continue
     raise last_err if last_err else Exception("eb_request exhausted retries")
 
@@ -353,16 +355,26 @@ def compute_dashboard_data():
     """Fetch + assemble everything the frontend needs. Cached at the caller."""
     t0 = time.time()
 
-    # 1. Fetch EB events + FB campaign metadata in parallel
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    # 1. Fetch EB events + FB campaign metadata in parallel.
+    # Hard timeouts + manual shutdown(wait=False) so a hung upstream future
+    # can't deadlock the whole compute (the 'with' block's default shutdown
+    # waits forever for stuck submissions).
+    pool = ThreadPoolExecutor(max_workers=2)
+    try:
         f_events = pool.submit(fetch_eb_events)
         f_fb_meta = pool.submit(fetch_fb_campaigns_meta)
-        events_raw = f_events.result()
         try:
-            meta_by_num, meta_by_city = f_fb_meta.result()
+            events_raw = f_events.result(timeout=60)
         except Exception as e:
-            log("warn", "fb_meta_failed_continuing", error=str(e))
+            log("error", "eb_events_failed_or_timeout", error=str(e))
+            events_raw = []
+        try:
+            meta_by_num, meta_by_city = f_fb_meta.result(timeout=30)
+        except Exception as e:
+            log("warn", "fb_meta_failed_or_timeout", error=str(e))
             meta_by_num, meta_by_city = {}, {}
+    finally:
+        pool.shutdown(wait=False)
 
     # 2. Fetch FB insights for all 6 periods in parallel
     today = datetime.now(ET).date()
@@ -375,17 +387,21 @@ def compute_dashboard_data():
         "all": ("2024-01-01", today.isoformat()),
     }
     fb_data = {}
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    pool = ThreadPoolExecutor(max_workers=6)
+    try:
         futs = {pool.submit(fetch_fb_insights, s, u): name for name, (s, u) in fb_ranges.items()}
         for fut, name in futs.items():
             try:
-                rows = fut.result(timeout=45)
+                rows = fut.result(timeout=30)
                 fb_data[name] = aggregate_fb_by_event(rows)
             except Exception as e:
-                log("warn", "fb_period_failed", period=name, error=str(e))
+                log("warn", "fb_period_failed_or_timeout", period=name, error=str(e))
                 fb_data[name] = {}
-    state["fb"]["last_success_at"] = time.time()
-    state["fb"]["last_error"] = None
+    finally:
+        pool.shutdown(wait=False)
+    if any(fb_data.values()):
+        state["fb"]["last_success_at"] = time.time()
+        state["fb"]["last_error"] = None
 
     # 3. Classify events as active vs past
     active = []
